@@ -28,6 +28,7 @@ public class DependencyHandler extends BaseMessageHandler {
         "get_dependency_status",      // Get all SDK statuses
         "install_dependency",         // Install SDK
         "uninstall_dependency",       // Uninstall SDK
+        "update_dependency",          // Update SDK (uninstall + reinstall)
         "check_dependency_updates",   // Check for updates
         "check_node_environment"      // Check Node.js environment
     };
@@ -81,6 +82,9 @@ public class DependencyHandler extends BaseMessageHandler {
                 return true;
             case "uninstall_dependency":
                 this.handleUninstall(content);
+                return true;
+            case "update_dependency":
+                this.handleUpdate(content);
                 return true;
             case "check_dependency_updates":
                 this.handleCheckUpdates(content);
@@ -199,17 +203,7 @@ public class DependencyHandler extends BaseMessageHandler {
                     }
 
                     InstallResult result = this.dependencyManager.installSdkSync(sdkId, (logLine) -> {
-                        // Send installation progress log
-                        JsonObject progress = new JsonObject();
-                        progress.addProperty("sdkId", sdkId);
-                        progress.addProperty("log", logLine);
-
-                        ApplicationManager.getApplication().invokeLater(
-                            () -> this.callJavaScript(
-                                "window.dependencyInstallProgress",
-                                this.escapeJs(this.gson.toJson(progress))
-                            )
-                        );
+                        this.sendInstallProgress(sdkId, logLine);
                     });
 
                     this.sendInstallResult(result);
@@ -274,6 +268,80 @@ public class DependencyHandler extends BaseMessageHandler {
             LOG.error("[DependencyHandler] Failed to uninstall dependency: " + e.getMessage(), e);
             this.sendErrorResult("dependencyUninstallResult", e.getMessage());
             this.sendShowError("依赖卸载失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Update SDK (uninstall then reinstall).
+     */
+    private void handleUpdate(String content) {
+        try {
+            JsonObject json = this.gson.fromJson(content, JsonObject.class);
+            String sdkId = json.get("id").getAsString();
+
+            SdkDefinition sdk = SdkDefinition.fromId(sdkId);
+            if (sdk == null) {
+                this.sendInstallResult(InstallResult.failure(sdkId, "Unknown SDK: " + sdkId, ""));
+                return;
+            }
+
+            CompletableFuture.runAsync(() -> {
+                try {
+                    // Check Node.js environment
+                    if (!this.dependencyManager.checkNodeEnvironment()) {
+                        JsonObject errorResult = new JsonObject();
+                        errorResult.addProperty("success", false);
+                        errorResult.addProperty("sdkId", sdkId);
+                        errorResult.addProperty("error", "node_not_configured");
+                        errorResult.addProperty(
+                            "message",
+                            "Node.js not configured. Please set Node.js path in Settings > Basic."
+                        );
+
+                        ApplicationManager.getApplication().invokeLater(() ->
+                            this.callJavaScript(
+                                "window.dependencyInstallResult",
+                                this.escapeJs(this.gson.toJson(errorResult))
+                            )
+                        );
+                        return;
+                    }
+
+                    // Step 1: Uninstall
+                    this.sendInstallProgress(sdkId, "Uninstalling old version...");
+                    boolean uninstallSuccess = this.dependencyManager.uninstallSdk(sdkId);
+                    if (!uninstallSuccess) {
+                        this.sendInstallProgress(sdkId, "WARNING: Uninstall encountered issues, proceeding with reinstall...");
+                    } else {
+                        this.sendInstallProgress(sdkId, "Old version uninstalled successfully.");
+                    }
+
+                    // Step 2: Reinstall
+                    this.sendInstallProgress(sdkId, "\nInstalling latest version...");
+                    InstallResult result = this.dependencyManager.installSdkSync(sdkId, (logLine) -> {
+                        this.sendInstallProgress(sdkId, logLine);
+                    });
+
+                    this.sendInstallResult(result);
+
+                    // Refresh status after update completes
+                    if (result.isSuccess()) {
+                        this.handleGetStatus();
+                    }
+                } catch (Exception e) {
+                    LOG.error("[DependencyHandler] Failed during dependency update: " + e.getMessage(), e);
+                    this.sendErrorResult("dependencyInstallResult", e.getMessage());
+                    this.sendShowError("依赖更新失败: " + e.getMessage());
+                }
+            }, AppExecutorUtil.getAppExecutorService()).exceptionally(ex -> {
+                LOG.error("[DependencyHandler] Unexpected error in handleUpdate: " + ex.getMessage(), ex);
+                return null;
+            });
+
+        } catch (Exception e) {
+            LOG.error("[DependencyHandler] Failed to update dependency: " + e.getMessage(), e);
+            this.sendErrorResult("dependencyInstallResult", e.getMessage());
+            this.sendShowError("依赖更新失败: " + e.getMessage());
         }
     }
 
@@ -414,6 +482,19 @@ public class DependencyHandler extends BaseMessageHandler {
     private void sendNodeEnvironmentStatus(JsonObject result) {
         ApplicationManager.getApplication().invokeLater(() ->
             this.callJavaScript("window.nodeEnvironmentStatus", this.escapeJs(this.gson.toJson(result)))
+        );
+    }
+
+    private void sendInstallProgress(String sdkId, String logLine) {
+        JsonObject progress = new JsonObject();
+        progress.addProperty("sdkId", sdkId);
+        progress.addProperty("log", logLine);
+
+        ApplicationManager.getApplication().invokeLater(
+            () -> this.callJavaScript(
+                "window.dependencyInstallProgress",
+                this.escapeJs(this.gson.toJson(progress))
+            )
         );
     }
 

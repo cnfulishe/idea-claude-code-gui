@@ -37,6 +37,8 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
   const [loading, setLoading] = useState(true);
   const [installingSdk, setInstallingSdk] = useState<SdkId | null>(null);
   const [uninstallingSdk, setUninstallingSdk] = useState<SdkId | null>(null);
+  const [updatingSdk, setUpdatingSdk] = useState<SdkId | null>(null);
+  const updatingSdkRef = useRef<SdkId | null>(null);
   const [installLogs, setInstallLogs] = useState<string>('');
   const [showLogs, setShowLogs] = useState(false);
   const [nodeAvailable, setNodeAvailable] = useState<boolean | null>(null);
@@ -110,12 +112,16 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
     window.dependencyInstallResult = (jsonStr: string) => {
       try {
         const result: InstallResult = JSON.parse(jsonStr);
+        const wasUpdating = updatingSdkRef.current === result.sdkId;
         setInstallingSdk(null);
+        setUpdatingSdk(null);
+        updatingSdkRef.current = null;
 
         if (result.success) {
           const sdkDef = SDK_DEFINITIONS.find(d => d.id === result.sdkId);
           const sdkName = sdkDef ? tRef.current(sdkDef.nameKey) : result.sdkId;
-          addToastRef.current?.(tRef.current('settings.dependency.installSuccess', { name: sdkName }), 'success');
+          const msgKey = wasUpdating ? 'settings.dependency.updateSuccess' : 'settings.dependency.installSuccess';
+          addToastRef.current?.(tRef.current(msgKey, { name: sdkName }), 'success');
         } else if (result.error === 'node_not_configured') {
           addToastRef.current?.(tRef.current('settings.dependency.nodeNotConfigured'), 'warning');
         } else {
@@ -124,6 +130,8 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
       } catch (error) {
         console.error('[DependencySection] Failed to parse install result:', error);
         setInstallingSdk(null);
+        setUpdatingSdk(null);
+        updatingSdkRef.current = null;
       }
       if (typeof savedDependencyInstallResult === 'function') {
         try { savedDependencyInstallResult(jsonStr); } catch (e) {
@@ -230,6 +238,19 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
     sendToJava(`uninstall_dependency:${JSON.stringify({ id: sdkId })}`);
   };
 
+  const handleUpdate = (sdkId: SdkId) => {
+    if (nodeAvailable === false) {
+      addToast?.(t('settings.dependency.nodeNotConfigured'), 'warning');
+      return;
+    }
+
+    setUpdatingSdk(sdkId);
+    updatingSdkRef.current = sdkId;
+    setInstallLogs('');
+    setShowLogs(true);
+    sendToJava(`update_dependency:${JSON.stringify({ id: sdkId })}`);
+  };
+
   const getSdkInfo = (sdkId: SdkId): SdkStatus | undefined => {
     return sdkStatus[sdkId];
   };
@@ -271,9 +292,10 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
             const installed = isInstalled(sdk.id);
             const isInstalling = installingSdk === sdk.id;
             const isUninstalling = uninstallingSdk === sdk.id;
+            const isUpdating = updatingSdk === sdk.id;
             const hasUpdate = info?.hasUpdate;
-            // Only allow one operation at a time (install or uninstall)
-            const isAnyOperationInProgress = installingSdk !== null || uninstallingSdk !== null;
+            // Only allow one operation at a time (install, uninstall, or update)
+            const isAnyOperationInProgress = installingSdk !== null || uninstallingSdk !== null || updatingSdk !== null;
 
             return (
               <div key={sdk.id} className={styles.sdkCard}>
@@ -315,16 +337,23 @@ const DependencySection = ({ addToast, isActive }: DependencySectionProps) => {
                       </button>
                     ) : (
                       <>
-                        {hasUpdate && (
-                          <button
-                            className={styles.updateBtn}
-                            onClick={() => handleInstall(sdk.id)}
-                            disabled={isAnyOperationInProgress}
-                          >
-                            <span className="codicon codicon-sync" />
-                            <span>{t('settings.dependency.update')}</span>
-                          </button>
-                        )}
+                        <button
+                          className={styles.updateBtn}
+                          onClick={() => handleUpdate(sdk.id)}
+                          disabled={isAnyOperationInProgress}
+                        >
+                          {isUpdating ? (
+                            <>
+                              <span className="codicon codicon-loading codicon-modifier-spin" />
+                              <span>{t('settings.dependency.updating')}</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="codicon codicon-sync" />
+                              <span>{t('settings.dependency.update')}</span>
+                            </>
+                          )}
+                        </button>
                         <button
                           className={styles.uninstallBtn}
                           onClick={() => handleUninstall(sdk.id)}
